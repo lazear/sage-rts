@@ -4,9 +4,9 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use http::header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, ORIGIN};
 use http::StatusCode;
-use sage::database::{IndexedDatabase, Theoretical};
+use sage::database::IndexedDatabase;
 use sage::ion_series::Kind;
-use sage::mass::Tolerance;
+use sage::mass::{Tolerance, PROTON};
 use sage::mzml::{MzMlReader, Spectrum};
 use sage::scoring::{Percolator, Scorer};
 use sage::spectrum::{Peak, ProcessedSpectrum, SpectrumProcessor};
@@ -108,11 +108,14 @@ fn score_peptide(
                 most_intense_peak(&query.peaks, ion.monoisotopic_mass, request.fragment_tol)
             {
                 matches.push(MatchedPeaks {
-                    mz: peak.mass,
+                    mz: peak.mass + PROTON,
                     intensity: peak.intensity,
-                    fragment_mz: ion.monoisotopic_mass,
+                    fragment_mz: ion.monoisotopic_mass + PROTON,
                     fragment_kind: ion.kind,
-                    fragment_idx: idx + 1,
+                    fragment_idx: match ion.kind {
+                        Kind::Y => peptide.sequence.len() - idx,
+                        Kind::B => idx + 1,
+                    },
                 });
             }
         }
@@ -125,6 +128,7 @@ async fn score_spectrum(
     Json(query): Json<ScoreRequest>,
     Extension(state): Extension<Arc<State>>,
 ) -> Result<Response<String>, (StatusCode, String)> {
+    info!(message = "score_spectrum", scan_id = scan_id);
     let scorer = Scorer::new(
         &state.db,
         query.precursor_tolerance,
@@ -133,7 +137,6 @@ async fn score_spectrum(
         0,
         query.chimera,
     );
-
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
@@ -142,6 +145,12 @@ async fn score_spectrum(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Not an MS2 scan".into()))?;
 
     let scores = scorer.score(&spectra, query.report_psms);
+
+    info!(
+        message = "score_spectrum",
+        scan_id = scan_id,
+        results = scores.len()
+    );
     let body = serde_json::to_string_pretty(&scores)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -156,6 +165,11 @@ async fn score_spectrum_peptide(
     Json(peptide): Json<Peptide>,
     Extension(state): Extension<Arc<State>>,
 ) -> Result<Json<Vec<MatchedPeaks>>, (StatusCode, String)> {
+    info!(
+        message = "score_spectrum_peptide",
+        scan_id = scan_id,
+        sequence = peptide.sequence.as_str()
+    );
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
@@ -168,42 +182,59 @@ async fn score_spectrum_peptide(
 
 #[derive(Serialize)]
 struct Spec {
-    pub ms_level: usize,
-    pub scan_id: usize,
-    pub precursor_mz: Option<f32>,
-    pub precursor_int: Option<f32>,
-    pub precursor_charge: Option<u8>,
-    pub precursor_scan: Option<usize>,
-
-    // Scan start time
-    pub scan_start_time: f32,
-    // Ion injection time
-    pub ion_injection_time: f32,
-    // M/z array
+    pub scan: u32,
+    pub monoisotopic_mass: f32,
+    pub charge: u8,
+    pub rt: f32,
     pub mz: Vec<f32>,
-    // Intensity array
     pub intensity: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct SpectrumQuery {
+    deisotope: bool,
 }
 
 async fn get_spectrum(
     Path(scan_id): Path<usize>,
+    Query(deisotope): Query<SpectrumQuery>,
     Extension(state): Extension<Arc<State>>,
 ) -> Result<Json<Spec>, (StatusCode, String)> {
+    info!(message = "get_spectrum", scan_id = scan_id);
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
+    let spectra = SpectrumProcessor::new(150, 2000.0, deisotope.deisotope)
+        .process(spectra.clone())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Not an MS2 scan".into()))?;
+
+    let (mz, intensity) = spectra
+        .peaks
+        .into_iter()
+        .map(|peak| (peak.mass, peak.intensity))
+        .unzip();
+
     let spec = Spec {
-        ms_level: spectra.scan_id,
-        scan_id,
-        precursor_mz: spectra.precursor_mz,
-        precursor_int: spectra.precursor_int,
-        precursor_charge: spectra.precursor_charge,
-        precursor_scan: spectra.precursor_scan,
-        scan_start_time: spectra.scan_start_time,
-        ion_injection_time: spectra.ion_injection_time,
-        mz: spectra.mz.clone(),
-        intensity: spectra.intensity.clone(),
+        scan: spectra.scan,
+        rt: spectra.rt,
+        mz,
+        intensity,
+        monoisotopic_mass: spectra.monoisotopic_mass,
+        charge: spectra.charge,
     };
+
+    // let spec = Spec {
+    //     ms_level: spectra.scan_id,
+    //     scan_id,
+    //     precursor_mz: spectra.precursor_mz,
+    //     precursor_int: spectra.precursor_int,
+    //     precursor_charge: spectra.precursor_charge,
+    //     precursor_scan: spectra.precursor_scan,
+    //     scan_start_time: spectra.scan_start_time,
+    //     ion_injection_time: spectra.ion_injection_time,
+    //     mz: spectra.mz.clone(),
+    //     intensity: spectra.intensity.clone(),
+    // };
     Ok(Json(spec))
 }
 
@@ -248,6 +279,7 @@ async fn main() -> Result<(), Error> {
 
     let app = Router::new()
         .route("/spectrum/:scan_id", post(score_spectrum))
+        .route("/spectrum/:scan_id/peptide", post(score_spectrum_peptide))
         .route("/spectrum/:scan_id", get(get_spectrum))
         .layer(Extension(state))
         .layer(cors_layer)
