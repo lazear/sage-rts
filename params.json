@@ -1,0 +1,13 @@
+{
+    "bucket_size": 65535,
+    "fragment_min_mz": 75.0,
+    "fragment_max_mz": 1500.0,
+    "peptide_min_len": 7,
+    "peptide_max_len": 50,
+    "missed_cleavages": 1,
+    "static_mods": {
+      "C": 57.0215
+    },
+    "decoy_prefix": "rev_",
+    "fasta": "2022-07-23-decoys-reviewed-UP000005640.fas"
+}
