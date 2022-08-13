@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+import json
 from typing import Dict, List, Optional
 import requests
 import matplotlib.pyplot as plt
@@ -6,8 +7,9 @@ import matplotlib.pyplot as plt
 
 @dataclass
 class MatchedPeak:
-    mz: float
-    intensity: float
+    mz: Optional[float]
+    intensity: Optional[float]
+    charge: Optional[int]
     fragment_mz: float
     fragment_kind: str
     fragment_idx: float
@@ -39,10 +41,14 @@ class Score:
 
 @dataclass
 class Spectrum:
-    scan: int
-    monoisotopic_mass: float
-    charge: int
-    rt: float
+    ms_level: int
+    scan_id: int
+    precursor_mz: Optional[float]
+    precursor_int: Optional[float]
+    precursor_charge: Optional[int]
+    precursor_scan: Optional[int]
+    scan_start_time: float
+    ion_injection_time: float
     mz: List[float]
     intensity: List[float]
 
@@ -51,9 +57,12 @@ class Api:
     def __init__(self):
         self.url = "http://localhost:3000/spectrum"
 
-    def get_spectrum(self, scan_id: int) -> Optional[Spectrum]:
+    def get_spectrum(
+        self, scan_id: int, deisotope=True, max_peaks=150
+    ) -> Optional[Spectrum]:
         resp = requests.get(
-            f"{self.url}/{scan_id}?deisotope=true", headers={"accept-encoding": "gzip"}
+            f"{self.url}/{scan_id}?deisotope={str(deisotope).lower()}&max_peaks={max_peaks}",
+            headers={"accept-encoding": "gzip"},
         )
         if resp.ok:
             return Spectrum(**resp.json())
@@ -74,14 +83,16 @@ class Api:
         scan_id: int,
         peptide: str,
         modifications: Dict[str, float],
-        ppm: float = 10,
+        tolerance: Dict[str, List[float]],
         deisotope: bool = False,
+        nterm: Optional[float] = None,
     ) -> List[MatchedPeak]:
         data = {
-            "sequence": ''.join(c for c in peptide if c.isalpha()),
+            "sequence": "".join(c for c in peptide if c.isalpha()),
             "modifications": modifications,
-            "fragment_tol": {"ppm": [-ppm, ppm]},
+            "fragment_tol": tolerance,
             "deisotope": deisotope,
+            "nterm": nterm,
         }
 
         resp = requests.post(
@@ -96,37 +107,79 @@ class Api:
 
 
 class SpectrumGraph:
-    def __init__(self, scan_id: int):
+    def __init__(
+        self,
+        scan_id: int,
+        tolerance: Dict[str, List[float]],
+        modifications: Dict[str, float],
+        nterm: Optional[float] = None,
+        deisotope=False,
+        chimera=False,
+        max_peaks=150,
+    ):
         self.api = Api()
         self.scan_id = scan_id
-        self.spectrum = self.api.get_spectrum(scan_id)
+        self.spectrum = self.api.get_spectrum(
+            scan_id, deisotope=deisotope, max_peaks=max_peaks
+        )
+        self.deisotope = deisotope
+        self.tolerance = tolerance
+        self.modifications = modifications
+        self.nterm = nterm
+        self.fig = None
         self.anns = []
         self.matches = self.api.get_matches(
             scan_id,
             {
                 "precursor_tolerance": {"da": [-3.6, 1.2]},
-                "fragment_tolerance": {"ppm": [-10.0, 10.0]},
+                "fragment_tolerance": tolerance,
                 "report_psms": 10,
-                "chimera": True,
-                "deisotope": True,
+                "chimera": chimera,
+                "deisotope": deisotope,
             },
         )
-    
-    def base_plot(self):
-        self.fig, self.ax = plt.subplots()
 
+    def base_plot(self, sign=1):
+        if self.fig is None:
+            self.fig, self.ax = plt.subplots()
         for mz, intensity in zip(self.spectrum.mz, self.spectrum.intensity):
-            self.ax.vlines(mz, 0, intensity, colors="grey", linewidths=1, alpha=0.8)
+            self.ax.vlines(mz, 0, sign * intensity, colors="grey", linewidths=1, alpha=0.8)
 
-    def plot_match(self, match: Score):
-        peaks = self.api.get_matched_peaks(self.scan_id, match.peptide, dict(C=57.0215), deisotope=True)
+    def plot_match(self, peptide: str, sign=1):
+        peaks = self.api.get_matched_peaks(
+            self.scan_id,
+            peptide,
+            modifications=self.modifications,
+            nterm=self.nterm,
+            tolerance=self.tolerance,
+            deisotope=self.deisotope,
+        )
         for peak in peaks:
-            color = '#1976D2' if peak.fragment_kind == 'B' else '#D32F2F'
-            self.ax.vlines(peak.mz, 0, peak.intensity, colors=color, linewidths=1)
-            self.anns += [self.ax.annotate(f"{peak.fragment_kind.lower()}{peak.fragment_idx}+", xy=(peak.mz, peak.intensity+20), rotation=90, color=color)]
-    
+            color = "#1976D2" if peak.fragment_kind == "B" else "#D32F2F"
+            y = -50
+            x = peak.fragment_mz
+            if peak.mz and peak.intensity:
+                self.ax.vlines(peak.mz, 0, sign * peak.intensity, colors=color, linewidths=1)
+                x = peak.mz
+                y = peak.intensity * sign
+            else:
+                self.ax.vlines(
+                    peak.fragment_mz, 0, y, colors="purple", linewidths=1
+                )
+                # color = "purple"
+
+            self.anns += [
+                self.ax.annotate(
+                    f"{peak.fragment_kind.lower()}{peak.fragment_idx}+",
+                    xy=(x, y),
+                    rotation=90,
+                    color=color,
+                )
+            ]
+
     def plot(self):
         plt.show()
+
 
 # peaks = Api().get_matched_peaks(30069, matches[1].peptide, dict(C=57.0215))
 # for peak in peaks:
@@ -134,11 +187,34 @@ class SpectrumGraph:
 #     ax.annotate(f"{peak.fragment_kind.lower()}{peak.fragment_idx}+", xy=(peak.mz, peak.intensity), rotation=90)
 
 
-s = SpectrumGraph(30091)
+s = SpectrumGraph(
+    36010,
+    tolerance=dict(da=[-0.3, 0.3]),
+    deisotope=True,
+    chimera=False,
+    max_peaks=100,
+    modifications=dict(C=57.0215, K=229.1629),
+    nterm=229.1629,
+)
+# ann = 'GVLGYTEDAVVSSDFLGDSNSSIFDAAAGIQLSPK'
+ann = 'LVGDVFSSVANR'
 s.base_plot()
-for m in s.matches[:2]:
-    s.plot_match(m)
-    print(m)
-    # plt.suptitle(m.peptide)
+s.base_plot(sign=-1)
+s.ax.hlines(0, 0, 1200, colors='black', linewidths=2)
+s.plot_match(ann)
+s.plot_match(s.matches[0].peptide, sign=-1)
+plt.suptitle(f"{ann}, {s.matches[0].peptide}")
+plt.tight_layout()
 plt.show()
 plt.close()
+for m in s.matches:
+    print(json.dumps(asdict(m), indent=2))
+
+# for m in s.matches[:2]:
+#     s.base_plot()
+#     s.plot_match(m.peptide)
+#     print(json.dumps(asdict(m), indent=2))
+#     plt.suptitle(m.peptide)
+#     plt.tight_layout()
+#     plt.show()
+#     plt.close()

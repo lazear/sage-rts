@@ -53,8 +53,9 @@ pub struct Peptide {
 
 #[derive(Serialize)]
 pub struct MatchedPeaks {
-    mz: f32,
-    intensity: f32,
+    mz: Option<f32>,
+    intensity: Option<f32>,
+    charge: Option<u8>,
     fragment_mz: f32,
     fragment_kind: Kind,
     fragment_idx: usize,
@@ -103,22 +104,69 @@ fn score_peptide(
         .sort_unstable_by(|a, b| a.mass.total_cmp(&b.mass));
 
     for kind in [Kind::B, Kind::Y] {
-        for (idx, ion) in sage::ion_series::IonSeries::new(&peptide, kind).enumerate() {
-            if let Some(peak) =
-                most_intense_peak(&query.peaks, ion.monoisotopic_mass, request.fragment_tol)
-            {
-                matches.push(MatchedPeaks {
-                    mz: peak.mass + PROTON,
-                    intensity: peak.intensity,
-                    fragment_mz: ion.monoisotopic_mass + PROTON,
-                    fragment_kind: ion.kind,
-                    fragment_idx: match ion.kind {
-                        Kind::Y => peptide.sequence.len() - idx,
-                        Kind::B => idx + 1,
-                    },
-                });
+        for (idx, ion) in sage::ion_series::IonSeries::new(&peptide, kind)
+            .enumerate()
+            .filter(|(_, ion)| ion.monoisotopic_mass <= 2000.0)
+        {
+            for charge in 1..query.charge {
+                if let Some(peak) =
+                    most_intense_peak(&query.peaks, ion.monoisotopic_mass / charge as f32, request.fragment_tol)
+                {
+                    matches.push(MatchedPeaks {
+                        mz: Some(peak.mass + PROTON),
+                        intensity: Some(peak.intensity),
+                        charge: Some(charge),
+                        fragment_mz: ion.monoisotopic_mass + PROTON,
+                        fragment_kind: ion.kind,
+                        fragment_idx: match ion.kind {
+                            Kind::Y => peptide.sequence.len() - idx,
+                            Kind::B => idx + 1,
+                        },
+                    });
+                }
             }
         }
+        //     } else if kind == Kind::B {
+        //         if let Some(peak) = most_intense_peak(
+        //             &query.peaks,
+        //             ion.monoisotopic_mass - 18.0105,
+        //             request.fragment_tol,
+        //         ) {
+        //             matches.push(MatchedPeaks {
+        //                 mz: Some(peak.mass + PROTON - 18.0105),
+        //                 intensity: Some(peak.intensity),
+        //                 fragment_mz: ion.monoisotopic_mass + PROTON - 18.0105,
+        //                 fragment_kind: ion.kind,
+        //                 fragment_idx: match ion.kind {
+        //                     Kind::Y => peptide.sequence.len() - idx,
+        //                     Kind::B => idx + 1,
+        //                 },
+        //             });
+        //         } else {
+        //             matches.push(MatchedPeaks {
+        //                 mz: None,
+        //                 intensity: None,
+        //                 fragment_mz: ion.monoisotopic_mass + PROTON,
+        //                 fragment_kind: ion.kind,
+        //                 fragment_idx: match ion.kind {
+        //                     Kind::Y => peptide.sequence.len() - idx,
+        //                     Kind::B => idx + 1,
+        //                 },
+        //             });
+        //         }
+        //     } else {
+        //         matches.push(MatchedPeaks {
+        //             mz: None,
+        //             intensity: None,
+        //             fragment_mz: ion.monoisotopic_mass + PROTON,
+        //             fragment_kind: ion.kind,
+        //             fragment_idx: match ion.kind {
+        //                 Kind::Y => peptide.sequence.len() - idx,
+        //                 Kind::B => idx + 1,
+        //             },
+        //         });
+        //     }
+        // }
     }
     Ok(matches)
 }
@@ -182,17 +230,27 @@ async fn score_spectrum_peptide(
 
 #[derive(Serialize)]
 struct Spec {
-    pub scan: u32,
-    pub monoisotopic_mass: f32,
-    pub charge: u8,
-    pub rt: f32,
+    pub ms_level: usize,
+    pub scan_id: usize,
+    pub precursor_mz: Option<f32>,
+    pub precursor_int: Option<f32>,
+    pub precursor_charge: Option<u8>,
+    pub precursor_scan: Option<usize>,
+
+    // Scan start time
+    pub scan_start_time: f32,
+    // Ion injection time
+    pub ion_injection_time: f32,
+    // M/z array
     pub mz: Vec<f32>,
+    // Intensity array
     pub intensity: Vec<f32>,
 }
 
 #[derive(Deserialize)]
 struct SpectrumQuery {
     deisotope: bool,
+    max_peaks: usize,
 }
 
 async fn get_spectrum(
@@ -204,37 +262,32 @@ async fn get_spectrum(
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let spectra = SpectrumProcessor::new(150, 2000.0, deisotope.deisotope)
-        .process(spectra.clone())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Not an MS2 scan".into()))?;
+    let (mz, intensity) = if spectra.ms_level == 2 {
+        let processed = SpectrumProcessor::new(deisotope.max_peaks, 2000.0, deisotope.deisotope)
+            .process(spectra.clone())
+            .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Not an MS2 scan".into()))?;
 
-    let (mz, intensity) = spectra
-        .peaks
-        .into_iter()
-        .map(|peak| (peak.mass, peak.intensity))
-        .unzip();
-
-    let spec = Spec {
-        scan: spectra.scan,
-        rt: spectra.rt,
-        mz,
-        intensity,
-        monoisotopic_mass: spectra.monoisotopic_mass,
-        charge: spectra.charge,
+        processed
+            .peaks
+            .into_iter()
+            .map(|peak| (peak.mass, peak.intensity))
+            .unzip()
+    } else {
+        (spectra.mz.clone(), spectra.intensity.clone())
     };
 
-    // let spec = Spec {
-    //     ms_level: spectra.scan_id,
-    //     scan_id,
-    //     precursor_mz: spectra.precursor_mz,
-    //     precursor_int: spectra.precursor_int,
-    //     precursor_charge: spectra.precursor_charge,
-    //     precursor_scan: spectra.precursor_scan,
-    //     scan_start_time: spectra.scan_start_time,
-    //     ion_injection_time: spectra.ion_injection_time,
-    //     mz: spectra.mz.clone(),
-    //     intensity: spectra.intensity.clone(),
-    // };
+    let spec = Spec {
+        ms_level: spectra.ms_level,
+        scan_id,
+        precursor_mz: spectra.precursor_mz,
+        precursor_int: spectra.precursor_int,
+        precursor_charge: spectra.precursor_charge,
+        precursor_scan: spectra.precursor_scan,
+        scan_start_time: spectra.scan_start_time,
+        ion_injection_time: spectra.ion_injection_time,
+        mz,
+        intensity,
+    };
     Ok(Json(spec))
 }
 
@@ -253,8 +306,11 @@ async fn main() -> Result<(), Error> {
     let db = builder.make_parameters().build().unwrap();
     info!(message = "database created");
 
-    let file = std::fs::File::open("b1906_293T_proteinID_01A_QE3_122212.mzML")?;
-    // let file = std::fs::File::open("LQSRPAAPPAPGPGQLTLR.mzML")?;
+    // let file = std::fs::File::open("b1906_293T_proteinID_01A_QE3_122212.mzML")?;
+    let path = std::env::args()
+        .nth(1)
+        .expect("expecting mzML path argument");
+    let file = std::fs::File::open(path)?;
     let read = BufReader::new(file);
 
     let spectra = MzMlReader::default().parse(read)?;

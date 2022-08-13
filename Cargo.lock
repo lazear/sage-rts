@@ -786,7 +786,6 @@ checksum = "4501abdff3ae82a1c1b477a17252eb69cee9e66eb915c1abaa4f44d873df9f09"
 [[package]]
 name = "sage"
 version = "0.2.0"
-source = "git+https://github.com/lazear/sage#a15009ddfd0224687772a820f55c208b239ffd2a"
 dependencies = [
  "base64",
  "clap",
