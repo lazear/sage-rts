@@ -1,9 +1,10 @@
-from dataclasses import dataclass, asdict
 import json
-from typing import Dict, List, Optional
 import requests
 import matplotlib.pyplot as plt
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional
 
+PROTON = 1.0072764
 
 @dataclass
 class MatchedPeak:
@@ -11,6 +12,7 @@ class MatchedPeak:
     intensity: Optional[float]
     charge: Optional[int]
     fragment_mz: float
+    fragment_loss: float
     fragment_kind: str
     fragment_idx: float
 
@@ -38,19 +40,26 @@ class Score:
     q_value: float
     specid: int
 
+@dataclass
+class Precursor:
+    mz: float
+    intensity: Optional[float]
+    charge: Optional[int]
+    scan: Optional[int]
+
+@dataclass
+class Peak:
+    mass: float
+    intensity: float
 
 @dataclass
 class Spectrum:
-    ms_level: int
-    scan_id: int
-    precursor_mz: Optional[float]
-    precursor_int: Optional[float]
-    precursor_charge: Optional[int]
-    precursor_scan: Optional[int]
+    level: int
+    scan: int
     scan_start_time: float
     ion_injection_time: float
-    mz: List[float]
-    intensity: List[float]
+    precursors: List[Precursor]
+    peaks: List[Peak]
 
 
 class Api:
@@ -65,7 +74,10 @@ class Api:
             headers={"accept-encoding": "gzip"},
         )
         if resp.ok:
-            return Spectrum(**resp.json())
+            sp = Spectrum(**resp.json())
+            sp.peaks = [Peak(**p) for p in sp.peaks]
+            sp.precursors = [Precursor(**p) for p in sp.precursors]
+            return sp
         else:
             print(resp.text)
 
@@ -142,8 +154,8 @@ class SpectrumGraph:
     def base_plot(self, sign=1):
         if self.fig is None:
             self.fig, self.ax = plt.subplots()
-        for mz, intensity in zip(self.spectrum.mz, self.spectrum.intensity):
-            self.ax.vlines(mz, 0, sign * intensity, colors="grey", linewidths=1, alpha=0.8)
+        for peak in self.spectrum.peaks:
+            self.ax.vlines(peak.mass + PROTON, 0, sign * peak.intensity, colors="grey", linewidths=1, alpha=0.8)
 
     def plot_match(self, peptide: str, sign=1):
         peaks = self.api.get_matched_peaks(
@@ -154,6 +166,7 @@ class SpectrumGraph:
             tolerance=self.tolerance,
             deisotope=self.deisotope,
         )
+        print(len(peaks))
         for peak in peaks:
             color = "#1976D2" if peak.fragment_kind == "B" else "#D32F2F"
             y = -50
@@ -168,9 +181,16 @@ class SpectrumGraph:
                 )
                 # color = "purple"
 
+            pluses = ''.join('+' for _ in range(peak.charge))
+            loss = ''
+            if peak.fragment_loss >= 18:
+                loss = '-H2O'
+            elif peak.fragment_loss >= 17:
+                loss = '-NH3'
+            
             self.anns += [
                 self.ax.annotate(
-                    f"{peak.fragment_kind.lower()}{peak.fragment_idx}+",
+                    f"{peak.fragment_kind.lower()}{peak.fragment_idx}{pluses}{loss}",
                     xy=(x, y),
                     rotation=90,
                     color=color,
@@ -188,16 +208,17 @@ class SpectrumGraph:
 
 
 s = SpectrumGraph(
-    36010,
+    40324,
     tolerance=dict(da=[-0.3, 0.3]),
-    deisotope=True,
+    deisotope=False,
     chimera=False,
     max_peaks=100,
-    modifications=dict(C=57.0215, K=229.1629),
-    nterm=229.1629,
+    modifications=dict(C=57.0215, K=304.20715),
+    nterm=304.20715
 )
 # ann = 'GVLGYTEDAVVSSDFLGDSNSSIFDAAAGIQLSPK'
-ann = 'LVGDVFSSVANR'
+# ann = 'QLTFEEIAK'
+ann = 'CAVVSSAGSLK'
 s.base_plot()
 s.base_plot(sign=-1)
 s.ax.hlines(0, 0, 1200, colors='black', linewidths=2)
@@ -207,14 +228,5 @@ plt.suptitle(f"{ann}, {s.matches[0].peptide}")
 plt.tight_layout()
 plt.show()
 plt.close()
-for m in s.matches:
+for m in s.matches[:3]:
     print(json.dumps(asdict(m), indent=2))
-
-# for m in s.matches[:2]:
-#     s.base_plot()
-#     s.plot_match(m.peptide)
-#     print(json.dumps(asdict(m), indent=2))
-#     plt.suptitle(m.peptide)
-#     plt.tight_layout()
-#     plt.show()
-#     plt.close()

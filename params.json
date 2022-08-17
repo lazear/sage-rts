@@ -7,9 +7,9 @@
     "missed_cleavages": 1,
     "static_mods": {
       "C": 57.0215,
-      "K": 229.1629
+      "K": 304.2071
     },
-    "n_term_mod": 229.1629,
+    "n_term_mod": 304.2071,
     "decoy_prefix": "rev_",
-    "fasta": "UP000002311_559292.fasta"
+    "fasta": "UP000005640_9606.fasta"
 }

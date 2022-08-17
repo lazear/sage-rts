@@ -6,7 +6,7 @@ use http::header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, ORIGIN}
 use http::StatusCode;
 use sage::database::IndexedDatabase;
 use sage::ion_series::Kind;
-use sage::mass::{Tolerance, PROTON};
+use sage::mass::{Tolerance, H2O, NH3, PROTON};
 use sage::mzml::{MzMlReader, Spectrum};
 use sage::scoring::{Percolator, Scorer};
 use sage::spectrum::{Peak, ProcessedSpectrum, SpectrumProcessor};
@@ -57,23 +57,9 @@ pub struct MatchedPeaks {
     intensity: Option<f32>,
     charge: Option<u8>,
     fragment_mz: f32,
+    fragment_loss: f32,
     fragment_kind: Kind,
     fragment_idx: usize,
-}
-
-fn most_intense_peak(peaks: &[Peak], target: f32, tolerance: Tolerance) -> Option<Peak> {
-    let (lo, hi) = tolerance.bounds(target);
-    let window = sage::database::binary_search_slice(&peaks, |a, b| a.mass.total_cmp(&b), lo, hi);
-
-    let mut intensity = 0.0;
-    let mut best_peak = None;
-    for peak in peaks {
-        if peak.intensity >= intensity && peak.mass >= lo && peak.mass <= hi {
-            intensity = peak.intensity;
-            best_peak = Some(*peak);
-        }
-    }
-    best_peak
 }
 
 fn score_peptide(
@@ -103,20 +89,27 @@ fn score_peptide(
         .peaks
         .sort_unstable_by(|a, b| a.mass.total_cmp(&b.mass));
 
+    let charge = query.precursors[0].charge.unwrap_or(2);
+
     for kind in [Kind::B, Kind::Y] {
         for (idx, ion) in sage::ion_series::IonSeries::new(&peptide, kind)
             .enumerate()
             .filter(|(_, ion)| ion.monoisotopic_mass <= 2000.0)
         {
-            for charge in 1..query.charge {
+            for charge in 1..charge {
+                // for loss in [0.0, H2O, NH3] {
+                let loss = 0.0;
+                let mass = (ion.monoisotopic_mass - loss) / charge as f32;
+
                 if let Some(peak) =
-                    most_intense_peak(&query.peaks, ion.monoisotopic_mass / charge as f32, request.fragment_tol)
+                    sage::spectrum::select_closest_peak(&query.peaks, mass, request.fragment_tol)
                 {
                     matches.push(MatchedPeaks {
                         mz: Some(peak.mass + PROTON),
                         intensity: Some(peak.intensity),
                         charge: Some(charge),
                         fragment_mz: ion.monoisotopic_mass + PROTON,
+                        fragment_loss: loss,
                         fragment_kind: ion.kind,
                         fragment_idx: match ion.kind {
                             Kind::Y => peptide.sequence.len() - idx,
@@ -124,6 +117,7 @@ fn score_peptide(
                         },
                     });
                 }
+                // }
             }
         }
         //     } else if kind == Kind::B {
@@ -181,16 +175,19 @@ async fn score_spectrum(
         &state.db,
         query.precursor_tolerance,
         query.fragment_tolerance,
-        0,
-        0,
+        -1,
+        3,
+        None,
         query.chimera,
     );
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let spectra = SpectrumProcessor::new(150, 2000.0, query.deisotope)
-        .process(spectra.clone())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Not an MS2 scan".into()))?;
+    let spectra = SpectrumProcessor::new(150, 2000.0, query.deisotope).process(spectra.clone());
+
+    if spectra.level != 2 {
+        return Err((StatusCode::BAD_REQUEST, "Not an MS2 scan".into()));
+    }
 
     let scores = scorer.score(&spectra, query.report_psms);
 
@@ -221,30 +218,14 @@ async fn score_spectrum_peptide(
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let spectra = SpectrumProcessor::new(150, 2000.0, peptide.deisotope.unwrap_or(false))
-        .process(spectra.clone())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Not an MS2 scan".into()))?;
+    let spectra = SpectrumProcessor::new(100, 2000.0, peptide.deisotope.unwrap_or(false))
+        .process(spectra.clone());
+
+    if spectra.level != 2 {
+        return Err((StatusCode::BAD_REQUEST, "Not an MS2 scan".into()));
+    }
 
     score_peptide(&state, spectra, &peptide).map(Json)
-}
-
-#[derive(Serialize)]
-struct Spec {
-    pub ms_level: usize,
-    pub scan_id: usize,
-    pub precursor_mz: Option<f32>,
-    pub precursor_int: Option<f32>,
-    pub precursor_charge: Option<u8>,
-    pub precursor_scan: Option<usize>,
-
-    // Scan start time
-    pub scan_start_time: f32,
-    // Ion injection time
-    pub ion_injection_time: f32,
-    // M/z array
-    pub mz: Vec<f32>,
-    // Intensity array
-    pub intensity: Vec<f32>,
 }
 
 #[derive(Deserialize)]
@@ -257,38 +238,15 @@ async fn get_spectrum(
     Path(scan_id): Path<usize>,
     Query(deisotope): Query<SpectrumQuery>,
     Extension(state): Extension<Arc<State>>,
-) -> Result<Json<Spec>, (StatusCode, String)> {
+) -> Result<Json<ProcessedSpectrum>, (StatusCode, String)> {
     info!(message = "get_spectrum", scan_id = scan_id);
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let (mz, intensity) = if spectra.ms_level == 2 {
-        let processed = SpectrumProcessor::new(deisotope.max_peaks, 2000.0, deisotope.deisotope)
-            .process(spectra.clone())
-            .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Not an MS2 scan".into()))?;
+    let processed = SpectrumProcessor::new(deisotope.max_peaks, 2000.0, deisotope.deisotope)
+        .process(spectra.clone());
 
-        processed
-            .peaks
-            .into_iter()
-            .map(|peak| (peak.mass, peak.intensity))
-            .unzip()
-    } else {
-        (spectra.mz.clone(), spectra.intensity.clone())
-    };
-
-    let spec = Spec {
-        ms_level: spectra.ms_level,
-        scan_id,
-        precursor_mz: spectra.precursor_mz,
-        precursor_int: spectra.precursor_int,
-        precursor_charge: spectra.precursor_charge,
-        precursor_scan: spectra.precursor_scan,
-        scan_start_time: spectra.scan_start_time,
-        ion_injection_time: spectra.ion_injection_time,
-        mz,
-        intensity,
-    };
-    Ok(Json(spec))
+    Ok(Json(processed))
 }
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
