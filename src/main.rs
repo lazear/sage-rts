@@ -46,7 +46,7 @@ fn find_scan_id(spectra: &[Spectrum], scan: usize) -> Option<&Spectrum> {
 pub struct Peptide {
     sequence: String,
     modifications: HashMap<char, f32>,
-    nterm: Option<f32>,
+    // nterm: Option<f32>,
     fragment_tol: Tolerance,
     deisotope: Option<bool>,
 }
@@ -68,15 +68,13 @@ fn score_peptide(
     request: &Peptide,
 ) -> Result<Vec<MatchedPeaks>, (StatusCode, String)> {
     let digest = sage::fasta::Digest {
-        protein: "unknown",
-        sequence: &request.sequence,
+        decoy: false,
+        sequence: request.sequence.clone(),
+        missed_cleavages: 0,
+        idx: 0,
     };
     let mut peptide = sage::peptide::Peptide::try_from(&digest)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid AA: {}", e)))?;
-
-    if let Some(nterm) = request.nterm {
-        peptide.set_nterm_mod(nterm);
-    }
 
     for (r, m) in &request.modifications {
         peptide.static_mod(*r, *m);
@@ -178,12 +176,15 @@ async fn score_spectrum(
         -1,
         3,
         None,
+        0.0,
+        2000.0,
         query.chimera,
     );
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let spectra = SpectrumProcessor::new(150, 2000.0, query.deisotope).process(spectra.clone());
+    let spectra =
+        SpectrumProcessor::new(150, 0.0, 2000.0, query.deisotope).process(spectra.clone());
 
     if spectra.level != 2 {
         return Err((StatusCode::BAD_REQUEST, "Not an MS2 scan".into()));
@@ -218,7 +219,7 @@ async fn score_spectrum_peptide(
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let spectra = SpectrumProcessor::new(100, 2000.0, peptide.deisotope.unwrap_or(false))
+    let spectra = SpectrumProcessor::new(100, 0.0, 2000.0, peptide.deisotope.unwrap_or(false))
         .process(spectra.clone());
 
     if spectra.level != 2 {
@@ -243,7 +244,7 @@ async fn get_spectrum(
     let spectra = find_scan_id(&state.spectra, scan_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
 
-    let processed = SpectrumProcessor::new(deisotope.max_peaks, 2000.0, deisotope.deisotope)
+    let processed = SpectrumProcessor::new(deisotope.max_peaks, 0.0, 2000.0, deisotope.deisotope)
         .process(spectra.clone());
 
     Ok(Json(processed))
