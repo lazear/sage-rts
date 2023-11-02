@@ -1,18 +1,11 @@
-use axum::extract::{Json, Path, Query};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Extension, Router};
-use http::header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, ORIGIN};
-use http::StatusCode;
-use sage::database::IndexedDatabase;
-use sage::ion_series::Kind;
-use sage::mass::{Tolerance, H2O, NH3, PROTON};
-use sage::mzml::{MzMlReader, Spectrum};
-use sage::scoring::{Percolator, Scorer};
-use sage::spectrum::{Peak, ProcessedSpectrum, SpectrumProcessor};
+use axum::extract::{Json, State};
+use axum::routing::post;
+use axum::Router;
+use sage_core::database::IndexedDatabase;
+use sage_core::mass::Tolerance;
+use sage_core::scoring::{Feature, Scorer};
+use sage_core::spectrum::{Precursor, RawSpectrum, SpectrumProcessor};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::io::BufReader;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer};
 use tracing::info;
@@ -24,230 +17,59 @@ pub struct ScoreRequest {
     report_psms: usize,
     chimera: bool,
     deisotope: bool,
+
+    precursor_mz: f32,
+    precursor_charge: u8,
+    mz: Vec<f32>,
+    intensity: Vec<f32>,
 }
 
-pub struct State {
-    db: IndexedDatabase,
-    spectra: Vec<Spectrum>,
-}
-
-fn find_scan_id(spectra: &[Spectrum], scan: usize) -> Option<&Spectrum> {
-    if let Some(spectrum) = spectra.get(scan) {
-        if spectrum.scan_id == scan {
-            return Some(spectrum);
-        }
-    }
-
-    let idx = spectra.binary_search_by(|a| a.scan_id.cmp(&scan)).ok()?;
-    spectra.get(idx)
-}
-
-#[derive(Deserialize)]
-pub struct Peptide {
-    sequence: String,
-    modifications: HashMap<char, f32>,
-    // nterm: Option<f32>,
-    fragment_tol: Tolerance,
-    deisotope: Option<bool>,
-}
-
-#[derive(Serialize)]
-pub struct MatchedPeaks {
-    mz: Option<f32>,
-    intensity: Option<f32>,
-    charge: Option<u8>,
-    fragment_mz: f32,
-    fragment_loss: f32,
-    fragment_kind: Kind,
-    fragment_idx: usize,
-}
-
-fn score_peptide(
-    state: &State,
-    mut query: ProcessedSpectrum,
-    request: &Peptide,
-) -> Result<Vec<MatchedPeaks>, (StatusCode, String)> {
-    let digest = sage::fasta::Digest {
-        decoy: false,
-        sequence: request.sequence.clone(),
-        missed_cleavages: 0,
-        idx: 0,
-    };
-    let mut peptide = sage::peptide::Peptide::try_from(&digest)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid AA: {}", e)))?;
-
-    for (r, m) in &request.modifications {
-        peptide.static_mod(*r, *m);
-    }
-
-    let mut matches = Vec::new();
-    // let mut mz = query.peaks.iter().map(|peak| peak.mass).collect::<Vec<_>>();
-    // mz.sort_unstable_by(|a, b| a.total_cmp(&b));
-    query
-        .peaks
-        .sort_unstable_by(|a, b| a.mass.total_cmp(&b.mass));
-
-    let charge = query.precursors[0].charge.unwrap_or(2);
-
-    for kind in [Kind::B, Kind::Y] {
-        for (idx, ion) in sage::ion_series::IonSeries::new(&peptide, kind)
-            .enumerate()
-            .filter(|(_, ion)| ion.monoisotopic_mass <= 2000.0)
-        {
-            for charge in 1..charge {
-                // for loss in [0.0, H2O, NH3] {
-                let loss = 0.0;
-                let mass = (ion.monoisotopic_mass - loss) / charge as f32;
-
-                if let Some(peak) =
-                    sage::spectrum::select_closest_peak(&query.peaks, mass, request.fragment_tol)
-                {
-                    matches.push(MatchedPeaks {
-                        mz: Some(peak.mass + PROTON),
-                        intensity: Some(peak.intensity),
-                        charge: Some(charge),
-                        fragment_mz: ion.monoisotopic_mass + PROTON,
-                        fragment_loss: loss,
-                        fragment_kind: ion.kind,
-                        fragment_idx: match ion.kind {
-                            Kind::Y => peptide.sequence.len() - idx,
-                            Kind::B => idx + 1,
-                        },
-                    });
-                }
-                // }
-            }
-        }
-        //     } else if kind == Kind::B {
-        //         if let Some(peak) = most_intense_peak(
-        //             &query.peaks,
-        //             ion.monoisotopic_mass - 18.0105,
-        //             request.fragment_tol,
-        //         ) {
-        //             matches.push(MatchedPeaks {
-        //                 mz: Some(peak.mass + PROTON - 18.0105),
-        //                 intensity: Some(peak.intensity),
-        //                 fragment_mz: ion.monoisotopic_mass + PROTON - 18.0105,
-        //                 fragment_kind: ion.kind,
-        //                 fragment_idx: match ion.kind {
-        //                     Kind::Y => peptide.sequence.len() - idx,
-        //                     Kind::B => idx + 1,
-        //                 },
-        //             });
-        //         } else {
-        //             matches.push(MatchedPeaks {
-        //                 mz: None,
-        //                 intensity: None,
-        //                 fragment_mz: ion.monoisotopic_mass + PROTON,
-        //                 fragment_kind: ion.kind,
-        //                 fragment_idx: match ion.kind {
-        //                     Kind::Y => peptide.sequence.len() - idx,
-        //                     Kind::B => idx + 1,
-        //                 },
-        //             });
-        //         }
-        //     } else {
-        //         matches.push(MatchedPeaks {
-        //             mz: None,
-        //             intensity: None,
-        //             fragment_mz: ion.monoisotopic_mass + PROTON,
-        //             fragment_kind: ion.kind,
-        //             fragment_idx: match ion.kind {
-        //                 Kind::Y => peptide.sequence.len() - idx,
-        //                 Kind::B => idx + 1,
-        //             },
-        //         });
-        //     }
-        // }
-    }
-    Ok(matches)
-}
-
-async fn score_spectrum(
-    Path(scan_id): Path<usize>,
+async fn score_v1(
+    State(db): State<Arc<IndexedDatabase>>,
     Json(query): Json<ScoreRequest>,
-    Extension(state): Extension<Arc<State>>,
-) -> Result<Response<String>, (StatusCode, String)> {
-    info!(message = "score_spectrum", scan_id = scan_id);
-    let scorer = Scorer::new(
-        &state.db,
-        query.precursor_tolerance,
-        query.fragment_tolerance,
-        -1,
-        3,
-        None,
-        0.0,
-        2000.0,
-        query.chimera,
-    );
-    let spectra = find_scan_id(&state.spectra, scan_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
+) -> Result<Json<Vec<Feature>>, (axum::http::StatusCode, String)> {
+    let scorer = Scorer {
+        db: &db,
+        precursor_tol: query.precursor_tolerance,
+        fragment_tol: query.fragment_tolerance,
+        min_matched_peaks: 4,
+        min_isotope_err: 0,
+        max_isotope_err: 0,
+        min_precursor_charge: 1,
+        max_precursor_charge: 6,
+        max_fragment_charge: Some(1),
+        min_fragment_mass: 125.0,
+        max_fragment_mass: 2500.0,
+        chimera: false,
+        report_psms: query.report_psms,
+        wide_window: false,
+    };
+
+    let spectra = RawSpectrum {
+        file_id: 0,
+        ms_level: 2,
+        id: "real-time".into(),
+        precursors: vec![Precursor {
+            mz: query.precursor_mz,
+            intensity: None,
+            charge: Some(query.precursor_charge),
+            spectrum_ref: None,
+            isolation_window: None,
+        }],
+        representation: sage_core::spectrum::Representation::Centroid,
+        scan_start_time: 0.0,
+        ion_injection_time: 0.0,
+        total_ion_current: 0.0,
+        mz: query.mz,
+        intensity: query.intensity,
+    };
 
     let spectra =
         SpectrumProcessor::new(150, 0.0, 2000.0, query.deisotope).process(spectra.clone());
 
-    if spectra.level != 2 {
-        return Err((StatusCode::BAD_REQUEST, "Not an MS2 scan".into()));
-    }
+    let scores = scorer.score(&spectra);
 
-    let scores = scorer.score(&spectra, query.report_psms);
-
-    info!(
-        message = "score_spectrum",
-        scan_id = scan_id,
-        results = scores.len()
-    );
-    let body = serde_json::to_string_pretty(&scores)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    let builder = Response::builder()
-        .header("content-type", "application/json")
-        .status(StatusCode::OK);
-    Ok(builder.body(body).unwrap())
-}
-
-async fn score_spectrum_peptide(
-    Path(scan_id): Path<usize>,
-    Json(peptide): Json<Peptide>,
-    Extension(state): Extension<Arc<State>>,
-) -> Result<Json<Vec<MatchedPeaks>>, (StatusCode, String)> {
-    info!(
-        message = "score_spectrum_peptide",
-        scan_id = scan_id,
-        sequence = peptide.sequence.as_str()
-    );
-    let spectra = find_scan_id(&state.spectra, scan_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
-
-    let spectra = SpectrumProcessor::new(100, 0.0, 2000.0, peptide.deisotope.unwrap_or(false))
-        .process(spectra.clone());
-
-    if spectra.level != 2 {
-        return Err((StatusCode::BAD_REQUEST, "Not an MS2 scan".into()));
-    }
-
-    score_peptide(&state, spectra, &peptide).map(Json)
-}
-
-#[derive(Deserialize)]
-struct SpectrumQuery {
-    deisotope: bool,
-    max_peaks: usize,
-}
-
-async fn get_spectrum(
-    Path(scan_id): Path<usize>,
-    Query(deisotope): Query<SpectrumQuery>,
-    Extension(state): Extension<Arc<State>>,
-) -> Result<Json<ProcessedSpectrum>, (StatusCode, String)> {
-    info!(message = "get_spectrum", scan_id = scan_id);
-    let spectra = find_scan_id(&state.spectra, scan_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Cannot find scan id".into()))?;
-
-    let processed = SpectrumProcessor::new(deisotope.max_peaks, 0.0, 2000.0, deisotope.deisotope)
-        .process(spectra.clone());
-
-    Ok(Json(processed))
+    Ok(Json(scores))
 }
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -256,48 +78,24 @@ pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .with_ansi(true)
-        .with_max_level(tracing::Level::INFO)
-        .json()
+        .with_max_level(tracing::Level::TRACE)
         .init();
 
-    let db = std::fs::read_to_string("params.json")?;
-    let builder: sage::database::Builder = serde_json::from_str(&db)?;
-    let db = builder.make_parameters().build().unwrap();
-    info!(message = "database created");
+    let parameters: sage_core::database::Builder =
+        serde_json::from_str(&tokio::fs::read_to_string("params.json").await.unwrap()).unwrap();
 
-    // let file = std::fs::File::open("b1906_293T_proteinID_01A_QE3_122212.mzML")?;
-    let path = std::env::args()
-        .nth(1)
-        .expect("expecting mzML path argument");
-    let file = std::fs::File::open(path)?;
-    let read = BufReader::new(file);
+    let parameters = parameters.make_parameters();
+    let contents = tokio::fs::read_to_string(&parameters.fasta).await.unwrap();
 
-    let spectra = MzMlReader::default().parse(read)?;
+    let fasta =
+        sage_core::fasta::Fasta::parse(contents, &parameters.decoy_tag, parameters.generate_decoys);
 
-    let state = State { db, spectra };
-    let state = Arc::new(state);
-
-    info!(message = "ready to serve!");
-
-    // Set up CORS
-    let cors_layer = CorsLayer::new()
-        .allow_credentials(true)
-        .allow_headers(vec![
-            ACCEPT,
-            ACCEPT_ENCODING,
-            AUTHORIZATION,
-            CONTENT_TYPE,
-            ORIGIN,
-        ])
-        .allow_methods(tower_http::cors::Any)
-        .allow_origin(tower_http::cors::Any);
+    let db = parameters.build(fasta);
 
     let app = Router::new()
-        .route("/spectrum/:scan_id", post(score_spectrum))
-        .route("/spectrum/:scan_id/peptide", post(score_spectrum_peptide))
-        .route("/spectrum/:scan_id", get(get_spectrum))
-        .layer(Extension(state))
-        .layer(cors_layer)
+        .route("/v1/score/", post(score_v1))
+        .with_state(Arc::new(db))
+        .layer(CorsLayer::very_permissive())
         .layer(CompressionLayer::new().gzip(true).deflate(true));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -306,8 +104,5 @@ async fn main() -> Result<(), Error> {
         .serve(app.into_make_service())
         .await
         .unwrap();
-
-    println!("Hello, world!");
-
     Ok(())
 }

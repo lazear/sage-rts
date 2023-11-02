@@ -8,6 +8,7 @@ authors = ["Michael Lazear <lazear@scripps.edu>"]
 python = "^3.10"
 requests = "^2.28.1"
 matplotlib = "^3.5.3"
+pandas = "^1.4.4"
 
 [tool.poetry.dev-dependencies]
 black = "^22.6.0"

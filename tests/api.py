@@ -1,8 +1,10 @@
 import json
 import requests
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 PROTON = 1.0072764
 
@@ -19,6 +21,7 @@ class MatchedPeak:
 
 @dataclass
 class Score:
+    num_proteins: int
     peptide: str
     peptide_len: int
     proteins: str
@@ -29,16 +32,23 @@ class Score:
     charge: int
     rt: float
     delta_mass: float
+    average_ppm: float
+    missed_cleavages: int
+    isotope_error: float
     hyperscore: float
     delta_hyperscore: float
     matched_peaks: int
     longest_b: int
     longest_y: int
+    longest_y_pct: float
     matched_intensity_pct: float
     scored_candidates: int
     poisson: float
     q_value: float
+    discriminant_score: float
+    posterior_error: float
     specid: int
+
 
 @dataclass
 class Precursor:
@@ -46,6 +56,7 @@ class Precursor:
     intensity: Optional[float]
     charge: Optional[int]
     scan: Optional[int]
+    isolation_window: Optional[Tuple[float, float]]
 
 @dataclass
 class Peak:
@@ -60,6 +71,7 @@ class Spectrum:
     ion_injection_time: float
     precursors: List[Precursor]
     peaks: List[Peak]
+    total_intensity: float
 
 
 class Api:
@@ -97,14 +109,12 @@ class Api:
         modifications: Dict[str, float],
         tolerance: Dict[str, List[float]],
         deisotope: bool = False,
-        nterm: Optional[float] = None,
     ) -> List[MatchedPeak]:
         data = {
             "sequence": "".join(c for c in peptide if c.isalpha()),
             "modifications": modifications,
             "fragment_tol": tolerance,
             "deisotope": deisotope,
-            "nterm": nterm,
         }
 
         resp = requests.post(
@@ -124,7 +134,6 @@ class SpectrumGraph:
         scan_id: int,
         tolerance: Dict[str, List[float]],
         modifications: Dict[str, float],
-        nterm: Optional[float] = None,
         deisotope=False,
         chimera=False,
         max_peaks=150,
@@ -137,17 +146,18 @@ class SpectrumGraph:
         self.deisotope = deisotope
         self.tolerance = tolerance
         self.modifications = modifications
-        self.nterm = nterm
         self.fig = None
         self.anns = []
+    
+    def get_matches(self):
         self.matches = self.api.get_matches(
-            scan_id,
+            self.scan_id,
             {
                 "precursor_tolerance": {"da": [-3.6, 1.2]},
-                "fragment_tolerance": tolerance,
+                "fragment_tolerance": self.tolerance,
                 "report_psms": 10,
-                "chimera": chimera,
-                "deisotope": deisotope,
+                "chimera": self.chimera,
+                "deisotope": self.deisotope,
             },
         )
 
@@ -162,7 +172,6 @@ class SpectrumGraph:
             self.scan_id,
             peptide,
             modifications=self.modifications,
-            nterm=self.nterm,
             tolerance=self.tolerance,
             deisotope=self.deisotope,
         )
@@ -206,27 +215,42 @@ class SpectrumGraph:
 #     ax.vlines(peak.mz, 0, peak.intensity, colors='blue', linewidths=1)
 #     ax.annotate(f"{peak.fragment_kind.lower()}{peak.fragment_idx}+", xy=(peak.mz, peak.intensity), rotation=90)
 
+# for scan in 
 
-s = SpectrumGraph(
-    40324,
-    tolerance=dict(da=[-0.3, 0.3]),
-    deisotope=False,
-    chimera=False,
-    max_peaks=100,
-    modifications=dict(C=57.0215, K=304.20715),
-    nterm=304.20715
-)
-# ann = 'GVLGYTEDAVVSSDFLGDSNSSIFDAAAGIQLSPK'
-# ann = 'QLTFEEIAK'
-ann = 'CAVVSSAGSLK'
-s.base_plot()
-s.base_plot(sign=-1)
-s.ax.hlines(0, 0, 1200, colors='black', linewidths=2)
-s.plot_match(ann)
-s.plot_match(s.matches[0].peptide, sign=-1)
-plt.suptitle(f"{ann}, {s.matches[0].peptide}")
-plt.tight_layout()
-plt.show()
-plt.close()
-for m in s.matches[:3]:
-    print(json.dumps(asdict(m), indent=2))
+plt.rcParams["font.family"] = 'arial'
+plt.rcParams["font.size"] = 12
+plt.rcParams["figure.figsize"] = (12, 6)
+
+df = pd.read_csv('D:\SOL006\HCD\SoL_006_2_UHR_30HCD.sage.pin', sep='\t')
+df["delta_mass"] =df.expmass - df.calcmass
+
+# xs = df[df.peptide == "AIGAVPLIQGEYM(15.9949)IPC(57.0215)EK"]
+# xs = df[df.peptide == "ILLAELEQLKGQGK"]
+for scan in [8170]:
+    subset = df[df.scannr == scan].iloc[0]
+    print(subset)
+    s = SpectrumGraph(
+        scan,
+        tolerance=dict(ppm=[-5, 5]),
+        deisotope=False,
+        chimera=False,
+        max_peaks=150,
+        modifications=dict(C=57.0215, M=15.9949),
+    )
+    # ann = 'GVLGYTEDAVVSSDFLGDSNSSIFDAAAGIQLSPK'
+    # ann = 'QLTFEEIAK'
+    ann = ''.join(c for c in subset['peptide'] if c.isalpha())
+    s.base_plot()
+    # s.base_plot(sign=-1)
+    s.ax.hlines(0, *plt.xlim(), colors='black', linewidths=1)
+    s.plot_match(ann)
+    plt.xticks(np.arange(0, 2000, step=100), [str(x) for x in np.arange(0, 2000, step=100)], rotation=90)
+    # s.plot_match(s.matches[0].peptide, sign=-1)
+    # plt.suptitle(f"{ann}, {s.matches[0].peptide}")
+    plt.title(f"Scan {scan}: {ann} + {subset['delta_mass']:0.4f} (rt {subset['rt']})")
+    plt.tight_layout()
+    plt.show()
+    # plt.savefig(f'illaele/{scan}.png',dpi=300)
+    # plt.close()
+    # for m in s.matches[:3]:
+        # print(json.dumps(asdict(m), indent=2))

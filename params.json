@@ -1,15 +1,20 @@
 {
-    "bucket_size": 65535,
-    "fragment_min_mz": 200.0,
-    "fragment_max_mz": 2000.0,
-    "peptide_min_len": 7,
-    "peptide_max_len": 50,
-    "missed_cleavages": 1,
-    "static_mods": {
-      "C": 57.0215,
-      "K": 304.2071
-    },
-    "n_term_mod": 304.2071,
-    "decoy_prefix": "rev_",
-    "fasta": "UP000005640_9606.fasta"
+  "bucket_size": 4000,
+  "fragment_min_mz": 120.0,
+  "fragment_max_mz": 2000.0,
+  "peptide_min_len": 6,
+  "peptide_max_len": 50,
+  "peptide_min_mass": 300.0,
+  "peptide_max_mass": 5000.0,
+  "missed_cleavages": 2,
+  "decoy_prefix": "rev_",
+  "static_mods": {
+    "C": 57.0215
+  },
+  "variable_mods": {
+    "M": 15.9949,
+    "^": 304.29,
+    "K": 304.29
+  },
+  "fasta": "UP000005640_9606.fasta"
 }
