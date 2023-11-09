@@ -8,7 +8,6 @@ use sage_core::spectrum::{Precursor, RawSpectrum, SpectrumProcessor};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer};
-use tracing::info;
 
 #[derive(Deserialize, Serialize)]
 pub struct ScoreRequest {
@@ -24,10 +23,17 @@ pub struct ScoreRequest {
     intensity: Vec<f32>,
 }
 
+#[derive(Serialize)]
+pub struct AnnotatedFeature {
+    peptide: String,
+    proteins: String,
+    feature: Feature,
+}
+
 async fn score_v1(
     State(db): State<Arc<IndexedDatabase>>,
     Json(query): Json<ScoreRequest>,
-) -> Result<Json<Vec<Feature>>, (axum::http::StatusCode, String)> {
+) -> Result<Json<Vec<AnnotatedFeature>>, (axum::http::StatusCode, String)> {
     let scorer = Scorer {
         db: &db,
         precursor_tol: query.precursor_tolerance,
@@ -67,7 +73,15 @@ async fn score_v1(
     let spectra =
         SpectrumProcessor::new(150, 0.0, 2000.0, query.deisotope).process(spectra.clone());
 
-    let scores = scorer.score(&spectra);
+    let scores = scorer.score(&spectra)
+        .into_iter()
+        .map(|feature| {
+            AnnotatedFeature {
+                peptide: db[feature.peptide_idx].to_string(),
+                proteins: db[feature.peptide_idx].proteins(&db.decoy_tag, db.generate_decoys),
+                feature
+            }
+        }).collect();
 
     Ok(Json(scores))
 }
