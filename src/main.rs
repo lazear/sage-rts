@@ -73,15 +73,15 @@ async fn score_v1(
     let spectra =
         SpectrumProcessor::new(150, 0.0, 2000.0, query.deisotope).process(spectra.clone());
 
-    let scores = scorer.score(&spectra)
+    let scores = scorer
+        .score(&spectra)
         .into_iter()
-        .map(|feature| {
-            AnnotatedFeature {
-                peptide: db[feature.peptide_idx].to_string(),
-                proteins: db[feature.peptide_idx].proteins(&db.decoy_tag, db.generate_decoys),
-                feature
-            }
-        }).collect();
+        .map(|feature| AnnotatedFeature {
+            peptide: db[feature.peptide_idx].to_string(),
+            proteins: db[feature.peptide_idx].proteins(&db.decoy_tag, db.generate_decoys),
+            feature,
+        })
+        .collect();
 
     Ok(Json(scores))
 }
