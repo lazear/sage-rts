@@ -74,14 +74,12 @@ The following query runs a 1000 Da open search round trip in ~5 ms (against the 
 		123.84158325,
 		132.10189819,
 		136.11207581,
-        ...
 	],
 	"intensity": [
 		1411.77197266,
 		928.66247559,
 		5548.22070312,
 		810.61688232,
-        ...
 	]
 }
 ```
@@ -90,7 +88,7 @@ Which will return a list of PSMs (up to `report_psms`). Note that discriminant s
 
 ```json
 [
-    {
+  {
 		"peptide": "HHSSETHEVDSDLSYDSSDDSSPSNK",
 		"proteins": "rev_sp|P61129|ZC3H6_HUMAN",
 		"feature": {
