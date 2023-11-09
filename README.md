@@ -11,8 +11,8 @@ This crate implements a basic HTTP server that performs real-time database searc
 - Configuration is currently performed via a single `params.json` file located in the same directory as the binary
 
 ```sh
-git clone https://github.com/lazear/sage-server.git
-cd sage-server
+git clone https://github.com/lazear/sage-rts.git
+cd sage-rts
 
 curl https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/Eukaryota/UP000005640/UP000005640_9606.fasta.gz | gzip -d > UP000005640_9606.fasta
 

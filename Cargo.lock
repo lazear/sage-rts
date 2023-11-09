@@ -605,7 +605,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sage-server"
+name = "sage-rts"
 version = "0.1.0"
 dependencies = [
  "axum",
