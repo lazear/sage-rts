@@ -33,8 +33,8 @@ jobs:
       - name: Build archive
         shell: bash
         run: |
-          sage-rts_version=${{ github.ref_name }}
-          staging="sage-rts-$sage-rts_version-${{ matrix.target }}"
+          version=${{ github.ref_name }}
+          staging="sage-rts-$version-${{ matrix.target }}"
           mkdir -p "$staging"
           cp {README.md,LICENSE} "$staging/"
           cp "target/${{ matrix.target }}/release/sage-rts" "$staging/"
@@ -76,8 +76,8 @@ jobs:
       - name: Build archive
         shell: bash
         run: |
-          sage-rts_version=${{ github.ref_name }} 
-          staging="sage-rts-$sage-rts_version-${{ matrix.target }}"
+          version=${{ github.ref_name }} 
+          staging="sage-rts-$version-${{ matrix.target }}"
           mkdir -p "$staging"
           cp {README.md,LICENSE} "$staging/"
           cp "target/${{ matrix.target }}/release/sage-rts.exe" "$staging/"
@@ -122,8 +122,8 @@ jobs:
       - name: Build archive
         shell: bash
         run: |
-          sage-rts_version=${{ github.ref_name }} 
-          staging="sage-rts-$sage-rts_version-${{ matrix.target }}"
+          version=${{ github.ref_name }} 
+          staging="sage-rts-$version-${{ matrix.target }}"
           mkdir -p "$staging"
           cp {README.md,LICENSE} "$staging/"
           cp "target/${{ matrix.target }}/release/sage-rts" "$staging/"
